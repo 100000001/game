@@ -1,21 +1,21 @@
-pub mod packet;
-pub mod conn;
-
-use std::io;
+mod packet;
+pub mod connection;
+pub mod message;
+mod protocol;
+mod tcp;
+mod udp;
+pub mod udpmgr;
+#[cfg(test)]
+mod tests;
 
 // Reexports
-pub use self::packet::{Packet, ServerPacket, ClientPacket};
-pub use self::conn::Conn;
+pub use self::message::{Message, ServerMessage, ClientMessage, Error};
+pub use self::connection::Connection;
+pub use self::connection::Callback;
+pub use self::udpmgr::UdpMgr;
 
-#[derive(Debug)]
-pub enum Error {
-    NetworkErr(io::Error),
-    CannotSerialize,
-    CannotDeserialize,
-}
-
-impl From<io::Error> for Error {
-    fn from(e: io::Error) -> Error {
-        Error::NetworkErr(e)
-    }
+#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
+pub enum ClientMode {
+    Headless,
+    Character,
 }

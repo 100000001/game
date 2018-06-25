@@ -1,14 +1,21 @@
-use bifrost::{Relay, event};
-use common::network::packet::{ClientPacket, ServerPacket};
-use common::Uid;
-use config::PartialConfig;
-use player::Player;
-use region::Entity;
-use session::Session;
+// Standard
 use std::collections::hash_map::{Iter, IterMut};
 use std::collections::HashMap;
 use std::thread::JoinHandle;
 use std::time::Duration;
+
+// Library
+use bifrost::{Relay, event};
+use config::PartialConfig;
+
+// Project
+use common::net::message::{ClientMessage, ServerMessage};
+use common::Uid;
+use region::Entity;
+
+// Local
+use player::Player;
+use session::Session;
 
 pub struct ServerContext {
     // Configuration
@@ -76,9 +83,9 @@ impl ServerContext {
 
     // Network
 
-    pub fn send_packet(&self, session_id: u32, packet: &ServerPacket) { self.get_session(session_id).map(|it| it.send_packet(packet)); }
-    pub fn broadcast_packet(&self, packet: &ServerPacket) {
-        self.sessions.iter().for_each(|(_, ref it)| it.send_packet(packet));
+    pub fn send_message(&self, session_id: u32, message: ServerMessage) { self.get_session(session_id).map(|it| it.send_message(message)); }
+    pub fn broadcast_packet(&self, message: ServerMessage) {
+        self.sessions.iter().for_each(|(_, ref it)| it.send_message(message.clone()));
     }
 
 
@@ -95,17 +102,18 @@ impl ServerContext {
 
     // Updates
 
-    pub fn get_entity_updates(&self) -> Vec<(Uid, ServerPacket)> {
-
+    pub fn get_entity_updates(&self) -> Vec<(Uid, ServerMessage)> {
         self.get_entities()
             .map(|(entity_id, entity)| {
-                (*entity_id, ServerPacket::EntityUpdate { uid: *entity_id, pos: *entity.pos()})
+                (*entity_id, ServerMessage::EntityUpdate { uid: *entity_id, pos: entity.pos(), ori: entity.ori() })
             })
-            .collect::<Vec<(Uid, ServerPacket)>>()
+            .collect::<Vec<(Uid, ServerMessage)>>()
     }
 
     pub fn kick_session(&mut self, session_id: u32) {
         if let Some(session) = self.get_session(session_id) {
+            info!("Session '{}' disconnected!", session_id);
+            session.stop_conn();
             session.get_player_id().map(|player_id| self.kick_player(player_id));
         }
         self.del_session(session_id);
@@ -114,7 +122,7 @@ impl ServerContext {
     pub fn kick_player(&mut self, player_id: Uid) {
         if let Some(player) = self.get_player(player_id) {
             info!("Player '{}' disconnected!", player.alias());
-            player.get_entity_id().map(|entity_id| self.del_entity(entity_id));
+            player.get_entity_uid().map(|entity_id| self.del_entity(entity_id));
         }
         self.del_player(player_id);
     }
@@ -128,8 +136,9 @@ pub fn update_world(relay: &Relay<ServerContext>, ctx: &mut ServerContext) {
     //debug!("TICK!");
     // Send Entity Updates
 
-    remove_disconected_players(relay, ctx);
+    debug!("Players Entities Sessions: {} {} {}", ctx.players.len(), ctx.entities.len(), ctx.sessions.len());
 
+    remove_disconected_players(relay, ctx);
     send_entities_update(relay, ctx);
 
 
@@ -138,7 +147,7 @@ pub fn update_world(relay: &Relay<ServerContext>, ctx: &mut ServerContext) {
 
 fn remove_disconected_players(relay: &Relay<ServerContext>, ctx: &mut ServerContext) {
 
-    let mut sessions_id_to_kick = ctx.get_sessions()
+    let sessions_id_to_kick = ctx.get_sessions()
         .filter(|(_, session)| session.should_kick() )
         .map(|(session_id, _)| *session_id)
         .collect::<Vec<u32>>();
@@ -154,12 +163,14 @@ fn send_entities_update(relay: &Relay<ServerContext>, ctx: &mut ServerContext) {
 
     for (_, session) in sessions {
         let player = ctx.get_player_from_session(session.as_ref());
-        let player_entity_id = player.and_then(|p| p.get_entity_id()).unwrap_or(0);
-
-        for (uid, update) in &updates {
-            if *uid != player_entity_id {
-                session.send_packet(update);
-            }
+        match player.and_then(|p| p.get_entity_uid()) {
+            Some(player_entity_id) => for (uid, update) in &updates {
+                if *uid != player_entity_id {
+                    let up = update.clone();
+                    session.send_message(up);
+                }
+            },
+            _ => {},
         }
     }
 }

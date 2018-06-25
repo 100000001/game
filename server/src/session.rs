@@ -1,20 +1,22 @@
-use bifrost::Relay;
-use common::network::packet_handler::{PacketSender, PacketReceiver};
-use common::Uid;
-use network::event::PacketReceived;
-use player::Player;
-use server_context::ServerContext;
+// Standard
 use std::net::TcpStream;
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::sync::MutexGuard;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::cell::{RefCell, Cell};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time;
-use common::network::packet::ServerPacket;
-use std::cell::RefCell;
-use std::cell::Cell;
-use network::event::KickSession;
+
+// Library
+use bifrost::Relay;
+
+// Project
+use common::net::{Connection, ServerMessage, ClientMessage, Message, UdpMgr};
+use common::Uid;
+
+// Local
+use network::event::{PacketReceived, KickSession};
+use player::Player;
+use server_context::ServerContext;
 
 #[derive(Copy, Clone, PartialEq)]
 pub enum SessionState {
@@ -25,52 +27,52 @@ pub enum SessionState {
 pub struct Session {
     id: u32,
     listen_thread_handle: Option<JoinHandle<()>>,
-    packet_sender: RefCell<PacketSender>,
+    conn: Arc<Connection<ClientMessage>>,
     player_id: Option<Uid>,
     state: Cell<SessionState>,
 }
 
 impl Session {
-    pub fn new(id: u32, stream: TcpStream) -> Session {
-        Session {
-            id,
-            listen_thread_handle: None,
-            packet_sender: RefCell::new(PacketSender::new(Some(stream), None)),
-            player_id: None,
-            state: Cell::new(SessionState::Connected),
-        }
-    }
-
-    pub fn start_listen_thread(&mut self, relay: Relay<ServerContext>) {
-        let packet_receiver = PacketReceiver::new(Some(self.packet_sender.borrow_mut().clone_tcp_stream()), None);
-        let id = self.id;
-        self.listen_thread_handle = Some(thread::spawn(move || {
-            Session::listen_for_packets(packet_receiver, relay, id);
-        }));
-    }
-
-    fn listen_for_packets(mut packet_receiver: PacketReceiver, relay: Relay<ServerContext>, session_id: u32) {
-        loop {
-            match packet_receiver.recv_packet() {
-                Ok(packet) => {
+    pub fn new(id: u32, stream: TcpStream, udpmgr: Arc<UdpMgr>, relay: &Relay<ServerContext>) -> Session {
+        let relay = relay.clone();
+        let conn = Connection::new_stream(stream, Box::new(move |m| {
+            //callback message
+            let ret = *m;
+            match ret {
+                Ok(message) => {
                     relay.send(PacketReceived {
-                        session_id,
-                        data: packet,
+                        session_id: id,
+                        data: message,
                     });
                 },
                 _ => {
-                    relay.send(KickSession { session_id });
-                    break;
+                    relay.send(KickSession { session_id: id });
                 },
-            }
-        }
+            };
+        }), None, udpmgr).unwrap();
+        Connection::start(&conn);
+        let session = Session {
+            id,
+            listen_thread_handle: None,
+            conn,
+            player_id: None,
+            state: Cell::new(SessionState::Connected),
+        };
+
+        return session;
     }
 
-    pub fn send_packet(&self, packet: &ServerPacket) {
+    pub fn send_message(&self, message: ServerMessage) {
+        self.conn.send(message);
+        /*
         match self.packet_sender.borrow_mut().send_packet(packet) {
             Ok(_) => {},
             Err(_) => self.state.set(SessionState::ShouldKick),
-        }
+        }*/
+    }
+
+    pub fn stop_conn(&self) {
+        Connection::stop(&self.conn);
     }
 
     pub fn get_id(&self) -> u32 { self.id }
