@@ -20,9 +20,9 @@ pub use region::Volume as Volume;
 // Standard
 use std::thread;
 use std::time;
-use std::sync::{Arc, Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard, Barrier};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard, Barrier};
 use std::collections::HashMap;
-use std::net::{ToSocketAddrs, TcpStream};
+use std::net::{ToSocketAddrs};
 
 // Library
 use coord::prelude::*;
@@ -70,7 +70,7 @@ pub struct Client {
 }
 
 impl Callback<ServerMessage> for Client {
-    fn recv(&self, msg: Box<Result<ServerMessage, common::net::Error>>) {
+    fn recv(&self, msg: Result<ServerMessage, common::net::Error>) {
         self.handle_packet(msg.unwrap());
     }
 }
@@ -96,12 +96,7 @@ impl Client {
             finished: Barrier::new(2),
         });
 
-        *client.conn.callbackobj() = Some(Box::new(client.clone()));
-
-        /*
-        *client.conn.callback() = Box::new(|m: Box<ServerMessage>| {
-            client.handle_packet(*m);
-        });*/
+        *client.conn.callbackobj() = Some(client.clone());
 
         Self::start(client.clone());
 
@@ -114,14 +109,18 @@ impl Client {
 
     fn tick(&self, dt: f32) {
         if let Some(uid) = self.player().entity_uid {
-            if let Some(e) = self.entities_mut().get_mut(&uid) {
-                *e.pos_mut() += self.player().dir_vec * dt;
-
+            if let Some(player_entry) = self.entities_mut().get_mut(&uid) {
                 self.conn.send(ClientMessage::PlayerEntityUpdate {
-                    pos: e.pos(),
-                    ori: e.ori(),
+                    pos: player_entry.pos(),
+                    move_dir: player_entry.move_dir(),
+                    look_dir: player_entry.look_dir(),
                 });
             }
+        }
+
+        for (uid, entity) in self.entities_mut().iter_mut() {
+            let move_dir = entity.move_dir();
+            *entity.pos_mut() += move_dir * dt;
         }
     }
 
@@ -131,7 +130,7 @@ impl Client {
                 if version == get_version() {
                     if let Some(uid) = entity_uid {
                         if !self.entities().contains_key(&uid) {
-                            self.entities_mut().insert(uid, Entity::new(vec3!(0.0, 0.0, 0.0), 0.0));
+                            self.entities_mut().insert(uid, Entity::new(vec3!(0.0, 0.0, 0.0), vec3!(0.0, 0.0, 0.0), vec2!(0.0, 0.0)));
                         }
                     }
                     self.player_mut().entity_uid = entity_uid;
@@ -148,34 +147,25 @@ impl Client {
             }
             ServerMessage::Shutdown => self.set_status(ClientStatus::Disconnected),
             ServerMessage::RecvChatMsg { alias, msg } => self.callbacks().call_recv_chat_msg(&alias, &msg),
-            ServerMessage::EntityUpdate { uid, pos, ori } => {
-                info!("Entity Update: uid:{} at pos:{:#?}", uid, pos);
+            ServerMessage::EntityUpdate { uid, pos, move_dir, look_dir } => {
+                info!("Entity Update: uid:{} at pos:{:#?}, move_dir:{:#?}, look_dir:{:#?}", uid, pos, move_dir, look_dir);
 
                 let mut entities = self.entities_mut();
                 match entities.get_mut(&uid) {
-                    Some(e) => *e.pos_mut() = pos,
-                    None => { entities.insert(uid, Entity::new(pos, ori)); },
+                    Some(e) => {
+                        *e.pos_mut() = pos;
+                        *e.move_dir_mut() = move_dir;
+                        *e.look_dir_mut() = look_dir;
+                    }
+                    None => { entities.insert(uid, Entity::new(pos, move_dir, look_dir)); },
                 }
             },
+            ServerMessage::Ping => self.conn.send(ClientMessage::Ping),
             _ => {},
         }
     }
 
     fn start(client: Arc<Client>) {
-        /*let client_ref = client.clone();
-
-        thread::spawn(move || {
-            while *client_ref.status() != ClientStatus::Disconnected {
-                match client_ref.mngr.recv() {
-                    Ok(p) => client_ref.handle_packet(p),
-                    Err(e) => warn!("Receive error: {:?}", e),
-                }
-            }
-            // Notify anything else that we've finished networking
-            client_ref.finished.wait();
-        });
-        */
-
 
         let client_ref = client.clone();
         thread::spawn(move || {

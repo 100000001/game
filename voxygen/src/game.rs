@@ -1,11 +1,12 @@
 // Standard
 use std::net::ToSocketAddrs;
-use std::sync::{Arc, Mutex, RwLock, RwLockWriteGuard};
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::f32::consts::PI;
 //use std::f32::{sin, cos};
 
 // Library
-use nalgebra::{Vector2, Vector3, Matrix4, Translation3, convert};
+use nalgebra::{Vector2, Vector3, Translation3, Rotation3, convert, dot};
 use coord::prelude::*;
 use glutin::{ElementState, VirtualKeyCode};
 use dot_vox;
@@ -18,7 +19,7 @@ use map::Map;
 use camera::Camera;
 use window::{RenderWindow, Event};
 use model_object::{ModelObject, Constants};
-use mesh::{Mesh, Vertex};
+use mesh::{Mesh};
 use region::Chunk;
 use key_state::KeyState;
 use vox::vox_to_model;
@@ -35,35 +36,36 @@ pub struct Game {
 // "Data" includes mutable state
 struct Data {
     player_model: ModelObject,
+    other_player_model: ModelObject,
     map: Map,
 }
 
 impl Game {
     pub fn new<R: ToSocketAddrs>(mode: ClientMode, alias: &str, remote_addr: R) -> Game {
-        let mut window = RenderWindow::new();
+        let window = RenderWindow::new();
 
         let vox = dot_vox::load("vox/3.vox").unwrap();
         let voxmodel = vox_to_model(vox);
 
-        let chunk = Chunk::test(vec3!(0, 0, 0), vec3!(100,100,100));
-        let test_mesh = Mesh::from(&chunk);
-/*
-        let mut player_mesh = Mesh::new();
-        player_mesh.add(&[
-            Vertex { pos: [0., 1., 0.], norm: [0., 0., 1.], col: [1., 0., 0., 1.] },
-            Vertex { pos: [-1., -1., 0.], norm: [0., 0., 1.], col: [0., 1., 0., 1.] },
-            Vertex { pos: [1., -1., 0.], norm: [0., 0., 1.], col: [0., 0., 1., 1.] },
-
-            Vertex { pos: [0., 1., 0.], norm: [0., 0., 1.], col: [1., 0., 0., 1.] },
-            Vertex { pos: [1., -1., 0.], norm: [0., 0., 1.], col: [0., 0., 1., 1.] },
-            Vertex { pos: [-1., -1., 0.], norm: [0., 0., 1.], col: [0., 1., 0., 1.] },
-        ]);*/
-        let mut player_mesh = Mesh::from(&voxmodel);
+        let player_mesh = Mesh::from(&voxmodel);
 
         let player_model = ModelObject::new(
             &mut window.renderer_mut(),
             &player_mesh,
         );
+
+        let vox = dot_vox::load("vox/5.vox").unwrap();
+        let voxmodel = vox_to_model(vox);
+
+        let other_player_mesh = Mesh::from(&voxmodel);
+
+        let other_player_model = ModelObject::new(
+            &mut window.renderer_mut(),
+            &other_player_mesh,
+        );
+
+        let chunk = Chunk::test(vec3!(0, 0, 0), vec3!(100,100,100));
+        let test_mesh = Mesh::from(&chunk);
 
         let test_model = ModelObject::new(
             &mut window.renderer_mut(),
@@ -86,6 +88,7 @@ impl Game {
         Game {
             data: Mutex::new(Data {
                 player_model,
+                other_player_model,
                 map,
             }),
             running: AtomicBool::new(true),
@@ -102,15 +105,15 @@ impl Game {
             match event {
                 Event::CloseRequest => self.running.store(false, Ordering::Relaxed),
                 Event::CursorMoved { dx, dy } => {
-                    let mut data = self.data.lock().unwrap();
+                    let data = self.data.lock().unwrap();
 
                     if self.window.cursor_trapped().load(Ordering::Relaxed) {
                         //debug!("dx: {}, dy: {}", dx, dy);
-                        self.camera.lock().unwrap().rotate_by(Vector2::<f32>::new(dx as f32 * 0.002, dy as f32 * 0.002))
+                        self.camera.lock().unwrap().rotate_by(Vector2::<f32>::new(dx as f32 * 0.002, dy as f32 * 0.002));
                     }
                 },
                 Event::MouseWheel { dy, .. } => {
-                    self.camera.lock().unwrap().zoom_by(-dy as f32);
+                    self.camera.lock().unwrap().zoom_by((-dy / 4.0) as f32);
                 },
                 Event::KeyboardInput { i, .. } => {
                     match i.virtual_keycode {
@@ -145,7 +148,7 @@ impl Game {
                 Event::Resized { w, h } => {
                     self.camera.lock().unwrap().set_aspect_ratio(w as f32 / h as f32);
                 },
-                _ => {},
+                //_ => {},
             }
         });
 
@@ -159,7 +162,16 @@ impl Game {
         let mov_vec = unit_vecs.0 * dir_vec.x + unit_vecs.1 * dir_vec.y;
         let fly_vec = self.key_state.lock().unwrap().fly_vec();
 
-        self.client.player_mut().dir_vec = vec3!(mov_vec.x, mov_vec.y, fly_vec);
+        //self.client.player_mut().dir_vec = vec3!(mov_vec.x, mov_vec.y, fly_vec);
+
+        let mut entries = self.client.entities_mut();
+        if let Some(eid) = self.client.player().entity_uid {
+            if let Some(player_entry) = entries.get_mut(&eid) {
+                *player_entry.move_dir_mut() = vec3!(mov_vec.x, mov_vec.y, fly_vec);
+                let ori = self.camera.lock().unwrap().ori();
+                *player_entry.look_dir_mut() = vec2!(ori.x, ori.y);
+            }
+        }
 
         self.running.load(Ordering::Relaxed)
     }
@@ -175,6 +187,7 @@ impl Game {
         }
 
         let camera_mats = self.camera.lock().unwrap().get_mats();
+        let camera_ori = self.camera.lock().unwrap().ori();
 
         // Render the test model
 
@@ -189,16 +202,25 @@ impl Game {
             renderer.render_model_object(&model);
         }
 
-        for (uid, entity) in self.client.entities().iter() {
+        for (eid, entity) in self.client.entities().iter() {
+            let model_mat = &Translation3::<f32>::from_vector(Vector3::<f32>::new(entity.pos().x, entity.pos().y, entity.pos().z)).to_homogeneous();
+            let rot = Rotation3::<f32>::new(Vector3::<f32>::new(0.0, 0.0, PI - entity.look_dir().x)).to_homogeneous();
+            let model_mat = model_mat * rot;
+            let mut data = self.data.lock().unwrap();
+            let ref mut model;
+            match self.client.player().entity_uid {
+                Some(uid) if uid == *eid => model = &mut data.player_model,
+                _ => model = &mut data.other_player_model,
+            }
             renderer.update_model_object(
-                &self.data.lock().unwrap().player_model,
+                &model,
                 Constants::new(
-                    &Translation3::<f32>::from_vector(Vector3::<f32>::new(entity.pos().x, entity.pos().y, entity.pos().z)).to_homogeneous(), // TODO: Improve this
+                    &model_mat, // TODO: Improve this
                     &camera_mats.0,
-                    &camera_mats.1
+                    &camera_mats.1,
                 )
             );
-            renderer.render_model_object(&self.data.lock().unwrap().player_model);
+            renderer.render_model_object(&model);
         }
 
         self.window.swap_buffers();
